@@ -20,8 +20,14 @@ TOKEN = os.getenv("TOKEN", "7730693256:AAG1qjPFiGtgmFU4BMnF0NE19aV_EzQfE-s")
 # Webhook URL (set to your Vercel URL)
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://you-slice-bot.vercel.app")
 
-# Initialize the Application
-application = ApplicationBuilder().token(TOKEN).build()
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle errors."""
+    logger.error(f"Update {update} caused error {context.error}")
+    if update and update.message:
+        await update.message.reply_text("😱 Uh-oh! Something broke on my end. Let’s try again! 🔄")
+
+# Initialize the Application with the error handler
+application = ApplicationBuilder().token(TOKEN).error_handler(error_handler).build()
 
 def validate_time_format(time_str):
     """Validate the time format (e.g., MM:SS or HH:MM:SS)."""
@@ -94,7 +100,7 @@ async def download_and_trim_video(update: Update, context: ContextTypes.DEFAULT_
                 '-t', str(duration),
                 '-c:v', 'libx264',
                 '-crf', '23',
-                '-preset', 'slow',
+                '-preset', 'medium',  # Changed to medium for faster processing
                 '-c:a', 'aac',
                 '-b:a', '128k',
                 '-y',
@@ -154,16 +160,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await download_and_trim_video(update, context, url, start_time, end_time, output_filename)
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle errors."""
-    logger.error(f"Update {update} caused error {context.error}")
-    if update and update.message:
-        await update.message.reply_text("😱 Uh-oh! Something broke on my end. Let’s try again! 🔄")
-
 # Add handlers to the application
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(Text() & ~Command(), handle_message))
-application.add_handler_error(error_handler)
 
 # Define the WSGI application for Vercel
 def app(environ, start_response):
