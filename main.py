@@ -7,15 +7,21 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 from telegram.ext.filters import Text, Command
 from telegram.error import TimedOut
 import yt_dlp
+from telegram.ext import ApplicationBuilder
+from wsgiref.simple_server import make_server
+import json
 
 # Set up logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Telegram bot token from BotFather
-TOKEN = "7730693256:AAG1qjPFiGtgmFU4BMnF0NE19aV_EzQfE-s"
-# Webhook URL (replace with your ngrok or server URL)
-WEBHOOK_URL = "https://you-slice-bot.vercel.app"
+TOKEN = os.getenv("TOKEN", "7730693256:AAG1qjPFiGtgmFU4BMnF0NE19aV_EzQfE-s")
+# Webhook URL (set to your Vercel URL)
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://you-slice-bot.vercel.app")
+
+# Initialize the Application
+application = ApplicationBuilder().token(TOKEN).build()
 
 def validate_time_format(time_str):
     """Validate the time format (e.g., MM:SS or HH:MM:SS)."""
@@ -82,17 +88,17 @@ async def download_and_trim_video(update: Update, context: ContextTypes.DEFAULT_
             # Step 3: Trim and compress the video using ffmpeg
             await update.message.reply_text(f"✂️ Trimming and compressing your clip from {start_time} to {end_time}... 🛠️")
             ffmpeg_cmd = [
-                'ffmpeg',
-                '-i', temp_file,  # Input file
-                '-ss', start_time,  # Start time
-                '-t', str(duration),  # Duration
-                '-c:v', 'libx264',  # Re-encode video with H.264
-                '-crf', '23',  # Constant Rate Factor (lower = better quality, higher = smaller size)
-                '-preset', 'slow',  # Slower preset for better compression
-                '-c:a', 'aac',  # Re-encode audio with AAC
-                '-b:a', '128k',  # 128 kbps audio bitrate
-                '-y',  # Overwrite output file if it exists
-                output_filename  # Output file
+                './bin/ffmpeg',
+                '-i', temp_file,
+                '-ss', start_time,
+                '-t', str(duration),
+                '-c:v', 'libx264',
+                '-crf', '23',
+                '-preset', 'slow',
+                '-c:a', 'aac',
+                '-b:a', '128k',
+                '-y',
+                output_filename
             ]
             result = subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True)
             logger.info(f"ffmpeg output: {result.stdout}")
@@ -109,16 +115,16 @@ async def download_and_trim_video(update: Update, context: ContextTypes.DEFAULT_
         max_retries = 3
         for attempt in range(max_retries):
             if video_sent:
-                break  # Skip if the video has already been sent
+                break
             try:
                 with open(output_filename, 'rb') as video:
                     await update.message.reply_video(video)
                 video_sent = True
                 logger.info("Video uploaded successfully.")
                 await update.message.reply_text("🎉 All done! Your video is ready! Enjoy! 😊")
-                break  # Success, exit the retry loop
+                break
             except TimedOut as e:
-                if attempt == max_retries - 1:  # Last attempt
+                if attempt == max_retries - 1:
                     raise e
                 await update.message.reply_text("⏳ Upload timed out, retrying... Please wait! 🔄")
                 logger.warning(f"Upload attempt {attempt + 1} timed out, retrying...")
@@ -154,23 +160,43 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update and update.message:
         await update.message.reply_text("😱 Uh-oh! Something broke on my end. Let’s try again! 🔄")
 
-def main():
-    """Set up the bot and webhook."""
-    # Create the Application with a custom request timeout
-    application = Application.builder().token(TOKEN).read_timeout(180).write_timeout(180).build()
+# Add handlers to the application
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(Text() & ~Command(), handle_message))
+application.add_handler_error(error_handler)
 
-    # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(Text() & ~Command(), handle_message))
-    application.add_error_handler(error_handler)
+# Define the WSGI application for Vercel
+def app(environ, start_response):
+    """Handle incoming HTTP requests from Telegram."""
+    if environ['REQUEST_METHOD'] == 'POST':
+        # Read the incoming request body (Telegram update)
+        content_length = int(environ.get('CONTENT_LENGTH', 0))
+        request_body = environ['wsgi.input'].read(content_length).decode('utf-8')
+        
+        # Parse the update
+        update = Update.de_json(json.loads(request_body), application.bot)
+        
+        # Process the update
+        application.process_update(update)
+        
+        # Respond with 200 OK
+        status = '200 OK'
+        response_headers = [('Content-type', 'text/plain')]
+        start_response(status, response_headers)
+        return [b'OK']
+    else:
+        # Respond to GET requests (e.g., for health checks)
+        status = '200 OK'
+        response_headers = [('Content-type', 'text/plain')]
+        start_response(status, response_headers)
+        return [b'YouSliceBot is running!']
 
-    # Set up webhook
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=8443,
-        url_path=TOKEN,
-        webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
-    )
-
+# For local testing (optional)
 if __name__ == "__main__":
-    main()
+    # Set the webhook for local testing (optional)
+    application.bot.set_webhook(url=f"{WEBHOOK_URL}/{TOKEN}")
+    
+    # Run a local server for testing
+    with make_server('', 8000, app) as httpd:
+        print("Serving on port 8000...")
+        httpd.serve_forever()
