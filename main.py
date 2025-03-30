@@ -8,15 +8,15 @@ from telegram.ext.filters import Text, Command
 from telegram.error import TimedOut
 import yt_dlp
 from telegram.ext import ApplicationBuilder
-from wsgiref.simple_server import make_server
 import json
+import asyncio
 
 # Set up logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Telegram bot token from BotFather
-TOKEN = os.getenv("TOKEN", "7730693256:AAG1qjPFiGtgmFU4BMnF0NE19aV_EzQfE-s")
+TOKEN = os.getenv("TOKEN", "7730693256:AAGgF3uqlGjDRelFNVz12lcAePX_Y0LhHVI")
 # Webhook URL (set to your Vercel URL)
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://you-slice-bot.vercel.app")
 
@@ -28,7 +28,6 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Initialize the Application with the error handler
 application = ApplicationBuilder().token(TOKEN).build()
-
 
 def validate_time_format(time_str):
     """Validate the time format (e.g., MM:SS or HH:MM:SS)."""
@@ -165,38 +164,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(Text() & ~Command(), handle_message))
 
-# Define the WSGI application for Vercel
-def app(environ, start_response):
-    """Handle incoming HTTP requests from Telegram."""
+# Define the WSGI application for Vercel (Serverless compatible)
+async def app(environ, start_response):
+    """Handle incoming HTTP requests from Telegram (Webhook for Vercel)."""
     if environ['REQUEST_METHOD'] == 'POST':
-        # Read the incoming request body (Telegram update)
         content_length = int(environ.get('CONTENT_LENGTH', 0))
         request_body = environ['wsgi.input'].read(content_length).decode('utf-8')
         
-        # Parse the update
         update = Update.de_json(json.loads(request_body), application.bot)
-        
-        # Process the update
-        application.process_update(update)
-        
-        # Respond with 200 OK
-        status = '200 OK'
-        response_headers = [('Content-type', 'text/plain')]
-        start_response(status, response_headers)
+        await application.update_queue.put(update)  # Queue the update for processing
+
+        start_response('200 OK', [('Content-Type', 'text/plain')])
         return [b'OK']
     else:
-        # Respond to GET requests (e.g., for health checks)
-        status = '200 OK'
-        response_headers = [('Content-type', 'text/plain')]
-        start_response(status, response_headers)
-        return [b'YouSliceBot is running!']
+        start_response('200 OK', [('Content-Type', 'text/plain')])
+        return [b'YouSliceBot is running on Vercel!']
 
-# For local testing (optional)
+# Set up the webhook when the script runs
 if __name__ == "__main__":
-    # Set the webhook for local testing (optional)
-    application.bot.set_webhook(url=f"{WEBHOOK_URL}/{TOKEN}")
-    
-    # Run a local server for testing
-    with make_server('', 8000, app) as httpd:
-        print("Serving on port 8000...")
-        httpd.serve_forever()
+    import asyncio
+    asyncio.run(application.bot.set_webhook(url=WEBHOOK_URL))
