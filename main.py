@@ -10,6 +10,7 @@ import yt_dlp
 from telegram.ext import ApplicationBuilder
 import json
 import asyncio
+from flask import Flask, request, Response
 
 # Set up logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -20,14 +21,17 @@ TOKEN = os.getenv("TOKEN", "7730693256:AAGgF3uqlGjDRelFNVz12lcAePX_Y0LhHVI")
 # Webhook URL (set to your Vercel URL)
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://you-slice-bot.vercel.app")
 
+# Initialize Flask app
+app = Flask(__name__)
+
+# Initialize the Telegram Application
+telegram_app = ApplicationBuilder().token(TOKEN).build()
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors."""
     logger.error(f"Update {update} caused error {context.error}")
     if update and update.message:
         await update.message.reply_text("😱 Uh-oh! Something broke on my end. Let’s try again! 🔄")
-
-# Initialize the Application with the error handler
-application = ApplicationBuilder().token(TOKEN).build()
 
 def validate_time_format(time_str):
     """Validate the time format (e.g., MM:SS or HH:MM:SS)."""
@@ -161,26 +165,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await download_and_trim_video(update, context, url, start_time, end_time, output_filename)
 
 # Add handlers to the application
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(Text() & ~Command(), handle_message))
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(MessageHandler(Text() & ~Command(), handle_message))
 
-# Define the WSGI application for Vercel (Serverless compatible)
-async def app(environ, start_response):
-    """Handle incoming HTTP requests from Telegram (Webhook for Vercel)."""
-    if environ['REQUEST_METHOD'] == 'POST':
-        content_length = int(environ.get('CONTENT_LENGTH', 0))
-        request_body = environ['wsgi.input'].read(content_length).decode('utf-8')
+# Flask route to handle Telegram Webhook
+@app.route('/', methods=['POST', 'GET'])
+async def webhook():
+    if request.method == 'POST':
+        # Get the incoming request data from Telegram
+        request_body = request.get_data(as_text=True)
+        update = Update.de_json(json.loads(request_body), telegram_app.bot)
         
-        update = Update.de_json(json.loads(request_body), application.bot)
-        await application.update_queue.put(update)  # Queue the update for processing
-
-        start_response('200 OK', [('Content-Type', 'text/plain')])
-        return [b'OK']
+        # Queue the update for processing
+        await telegram_app.update_queue.put(update)
+        return Response('OK', status=200, mimetype='text/plain')
     else:
-        start_response('200 OK', [('Content-Type', 'text/plain')])
-        return [b'YouSliceBot is running on Vercel!']
+        # Handle GET requests (e.g., health check)
+        return Response('YouSliceBot is running on Vercel!', status=200, mimetype='text/plain')
 
 # Set up the webhook when the script runs
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(application.bot.set_webhook(url=WEBHOOK_URL))
+    asyncio.run(telegram_app.bot.set_webhook(url=WEBHOOK_URL))
