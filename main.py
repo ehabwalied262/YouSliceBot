@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # Telegram bot token from BotFather
 TOKEN = "7730693256:AAG1qjPFiGtgmFU4BMnF0NE19aV_EzQfE-s"
 # Webhook URL (replace with your ngrok or server URL)
-WEBHOOK_URL = "https://7353-156-203-150-121.ngrok-free.app"
+WEBHOOK_URL = "https://you-slice-bot.vercel.app"
 
 def validate_time_format(time_str):
     """Validate the time format (e.g., MM:SS or HH:MM:SS)."""
