@@ -27,7 +27,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("😱 Uh-oh! Something broke on my end. Let’s try again! 🔄")
 
 # Initialize the Application with the error handler
-application = ApplicationBuilder().token(TOKEN).error_handler(error_handler).build()
+application = ApplicationBuilder().token(TOKEN).build()
+
 
 def validate_time_format(time_str):
     """Validate the time format (e.g., MM:SS or HH:MM:SS)."""
