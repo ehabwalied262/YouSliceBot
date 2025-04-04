@@ -1,5 +1,0 @@
-yt-dlp
-ffmpeg-python
-python-telegram-bot
-gunicorn
-flask

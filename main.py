@@ -7,31 +7,29 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 from telegram.ext.filters import Text, Command
 from telegram.error import TimedOut
 import yt_dlp
-from telegram.ext import ApplicationBuilder
-import json
 import asyncio
-from flask import Flask, request, Response
+from datetime import datetime, timedelta
 
 # Set up logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Telegram bot token from BotFather
-TOKEN = os.getenv("TOKEN", "7730693256:AAGgF3uqlGjDRelFNVz12lcAePX_Y0LhHVI")
-# Webhook URL (set to your Vercel URL)
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://you-slice-bot.vercel.app")
+TOKEN = "7730693256:AAGgF3uqlGjDRelFNVz12lcAePX_Y0LhHVI"
 
-# Initialize Flask app
-app = Flask(__name__)
+# Webhook URL (replace with your ngrok or server URL)
+WEBHOOK_URL = "https://a0dc-156-203-214-152.ngrok-free.app"
 
-# Initialize the Telegram Application
-telegram_app = ApplicationBuilder().token(TOKEN).build()
+# Create a queue for processing video requests
+request_queue = asyncio.Queue()
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle errors."""
-    logger.error(f"Update {update} caused error {context.error}")
-    if update and update.message:
-        await update.message.reply_text("😱 Uh-oh! Something broke on my end. Let’s try again! 🔄")
+# Dictionary to track user states: {user_id: {"last_request": datetime, "daily_count": int, "active_requests": int}}
+user_states = {}
+
+# Constants
+#MIN_WAIT 5 Wait Time (5 minutes wait between requests)
+MIN_WAIT_TIME = timedelta(minutes=5)
+DAILY_LIMIT = 10  # Max 10 videos per day per user
 
 def validate_time_format(time_str):
     """Validate the time format (e.g., MM:SS or HH:MM:SS)."""
@@ -65,7 +63,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def download_and_trim_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, start_time: str, end_time: str, output_filename: str):
     """Download a specific segment of a YouTube video with controlled quality."""
-    temp_file = "temp_video.mp4"
+    user_id = update.message.from_user.id
+    temp_file = f"temp_video_{user_id}.mp4"  # Unique temp file per user
     video_sent = False
     try:
         # Validate time inputs
@@ -98,17 +97,17 @@ async def download_and_trim_video(update: Update, context: ContextTypes.DEFAULT_
             # Step 3: Trim and compress the video using ffmpeg
             await update.message.reply_text(f"✂️ Trimming and compressing your clip from {start_time} to {end_time}... 🛠️")
             ffmpeg_cmd = [
-                './bin/ffmpeg',
-                '-i', temp_file,
-                '-ss', start_time,
-                '-t', str(duration),
-                '-c:v', 'libx264',
-                '-crf', '23',
-                '-preset', 'medium',  # Changed to medium for faster processing
-                '-c:a', 'aac',
-                '-b:a', '128k',
-                '-y',
-                output_filename
+                'ffmpeg',
+                '-i', temp_file,  # Input file
+                '-ss', start_time,  # Start time
+                '-t', str(duration),  # Duration
+                '-c:v', 'libx264',  # Re-encode video with H.264
+                '-crf', '23',  # Constant Rate Factor (lower = better quality, higher = smaller size)
+                '-preset', 'slow',  # Slower preset for better compression
+                '-c:a', 'aac',  # Re-encode audio with AAC
+                '-b:a', '128k',  # 128 kbps audio bitrate
+                '-y',  # Overwrite output file if it exists
+                output_filename  # Output file
             ]
             result = subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True)
             logger.info(f"ffmpeg output: {result.stdout}")
@@ -125,16 +124,16 @@ async def download_and_trim_video(update: Update, context: ContextTypes.DEFAULT_
         max_retries = 3
         for attempt in range(max_retries):
             if video_sent:
-                break
+                break  # Skip if the video has already been sent
             try:
                 with open(output_filename, 'rb') as video:
                     await update.message.reply_video(video)
                 video_sent = True
                 logger.info("Video uploaded successfully.")
                 await update.message.reply_text("🎉 All done! Your video is ready! Enjoy! 😊")
-                break
+                break  # Success, exit the retry loop
             except TimedOut as e:
-                if attempt == max_retries - 1:
+                if attempt == max_retries - 1:  # Last attempt
                     raise e
                 await update.message.reply_text("⏳ Upload timed out, retrying... Please wait! 🔄")
                 logger.warning(f"Upload attempt {attempt + 1} timed out, retrying...")
@@ -146,9 +145,39 @@ async def download_and_trim_video(update: Update, context: ContextTypes.DEFAULT_
         for file in [temp_file, output_filename]:
             if os.path.exists(file):
                 os.remove(file)
+        # Decrease active requests count
+        user_states[user_id]["active_requests"] -= 1
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle user messages."""
+    """Handle user messages by adding them to the queue with limits."""
+    user_id = update.message.from_user.id
+    current_time = datetime.now()
+
+    # Initialize user state if not exists
+    if user_id not in user_states:
+        user_states[user_id] = {"last_request": None, "daily_count": 0, "active_requests": 0, "day": current_time.date()}
+
+    # Reset daily count if it's a new day
+    if user_states[user_id]["day"] != current_time.date():
+        user_states[user_id] = {"last_request": None, "daily_count": 0, "active_requests": 0, "day": current_time.date()}
+
+    # Check if user has an active request
+    if user_states[user_id]["active_requests"] > 0:
+        await update.message.reply_text("⏳ You already have a request being processed! Wait until it’s done before sending another.")
+        return
+
+    # Check 5-minute wait
+    if user_states[user_id]["last_request"] and (current_time - user_states[user_id]["last_request"]) < MIN_WAIT_TIME:
+        wait_seconds = (MIN_WAIT_TIME - (current_time - user_states[user_id]["last_request"])).seconds
+        await update.message.reply_text(f"⏲️ Please wait {wait_seconds // 60} minutes and {wait_seconds % 60} seconds before sending another request!")
+        return
+
+    # Check daily limit
+    if user_states[user_id]["daily_count"] >= DAILY_LIMIT:
+        await update.message.reply_text(f"🚫 You’ve reached your daily limit of {DAILY_LIMIT} videos! Try again tomorrow.")
+        return
+
+    # Parse input
     user_input = update.message.text.split()
     if len(user_input) != 3:
         await update.message.reply_text(
@@ -160,29 +189,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     url, start_time, end_time = user_input
-    output_filename = f"output_{update.message.from_user.id}.mp4"
+    output_filename = f"output_{user_id}.mp4"
 
-    await download_and_trim_video(update, context, url, start_time, end_time, output_filename)
+    # Update user state
+    user_states[user_id]["last_request"] = current_time
+    user_states[user_id]["daily_count"] += 1
+    user_states[user_id]["active_requests"] += 1
 
-# Add handlers to the application
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(MessageHandler(Text() & ~Command(), handle_message))
+    # Add the request to the queue
+    await request_queue.put((update, context, url, start_time, end_time, output_filename))
+    await update.message.reply_text(f"📥 Your request has been queued! Daily usage: {user_states[user_id]['daily_count']}/{DAILY_LIMIT}. Please wait... ⏳")
 
-# Flask route to handle Telegram Webhook
-@app.route('/', methods=['POST', 'GET'])
-async def webhook():
-    if request.method == 'POST':
-        # Get the incoming request data from Telegram
-        request_body = request.get_data(as_text=True)
-        update = Update.de_json(json.loads(request_body), telegram_app.bot)
-        
-        # Queue the update for processing
-        await telegram_app.update_queue.put(update)
-        return Response('OK', status=200, mimetype='text/plain')
-    else:
-        # Handle GET requests (e.g., health check)
-        return Response('YouSliceBot is running on Vercel!', status=200, mimetype='text/plain')
+async def process_queue(worker_id):
+    """Background worker to process queued video requests."""
+    logger.info(f"Worker {worker_id} started")
+    while True:
+        # Get the next request from the queue
+        update, context, url, start_time, end_time, output_filename = await request_queue.get()
+        try:
+            # Process the request
+            await download_and_trim_video(update, context, url, start_time, end_time, output_filename)
+        finally:
+            # Mark the task as done
+            request_queue.task_done()
 
-# Set up the webhook when the script runs
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle errors."""
+    logger.error(f"Update {update} caused error {context.error}")
+    if update and update.message:
+        await update.message.reply_text("😱 Uh-oh! Something broke on my end. Let’s try again! 🔄")
+
+def main():
+    """Set up the bot and webhook."""
+    # Create the Application with a custom request timeout
+    application = Application.builder().token(TOKEN).read_timeout(180).write_timeout(180).build()
+
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(Text() & ~Command(), handle_message))
+    application.add_error_handler(error_handler)
+
+    # Start 5 service workers for true parallelism
+    for i in range(5):
+        asyncio.ensure_future(process_queue(i))
+
+    # Set up webhook
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=8443,
+        url_path=TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
+    )
+
 if __name__ == "__main__":
-    asyncio.run(telegram_app.bot.set_webhook(url=WEBHOOK_URL))
+    main()
